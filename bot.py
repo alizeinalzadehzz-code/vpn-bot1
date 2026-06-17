@@ -2,11 +2,11 @@ import os
 import logging
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton, MenuButtonCommands, BotCommand
+    ReplyKeyboardMarkup, KeyboardButton, BotCommand
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters, ConversationHandler
+    CallbackQueryHandler, ContextTypes, filters
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -17,8 +17,6 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "474098524"))
 SUPPORT_USERNAME = "ali_turk_z"
 CARD_NUMBER = "6219-8618-9208-9466"
 CARD_OWNER = "علی زینال‌زاده"
-
-WAITING_RECEIPT, WAITING_CONFIG = range(2)
 
 PACKAGES = {
     "pkg_10g": {
@@ -43,6 +41,8 @@ PACKAGES = {
     },
 }
 
+# state: user_id -> {"step": "waiting_receipt"/"waiting_config", "pkg_id": ..., "order_id": ...}
+user_state = {}
 pending_orders = {}
 order_counter = [1000]
 
@@ -50,12 +50,11 @@ def next_order_id():
     order_counter[0] += 1
     return f"ORD{order_counter[0]}"
 
-def main_reply_keyboard():
-    """منوی دکمه‌های بزرگ پایین صفحه"""
+def main_kb():
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton("🛒 خرید سرویس"), KeyboardButton("📦 سرویس‌های من")],
-            [KeyboardButton("🆘 پشتیبانی"), KeyboardButton("ℹ️ راهنما")],
+            [KeyboardButton("🆘 پشتیبانی"),   KeyboardButton("ℹ️ راهنما")],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -63,8 +62,9 @@ def main_reply_keyboard():
     )
 
 # ─── /start ───────────────────────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    user_state.pop(user.id, None)
     await update.message.reply_text(
         f"👋 سلام *{user.first_name}* عزیز!\n\n"
         "🚀 به ربات فروش VPN *TurkNet* خوش اومدی\n\n"
@@ -75,46 +75,95 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• 🛠 پشتیبانی ۲۴ ساعته\n\n"
         "از منوی پایین انتخاب کن 👇",
         parse_mode="Markdown",
-        reply_markup=main_reply_keyboard()
+        reply_markup=main_kb()
     )
 
-# ─── سرویس‌های من ─────────────────────────────────────────────────────────────
-async def my_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 جستجوی سرویس", callback_data="search_service")],
-        [InlineKeyboardButton("🔗 لینک کردن سرویس", callback_data="link_service")],
-        [InlineKeyboardButton("🔙 بازگشت", callback_data="back_home")],
-    ])
+# ─── خرید سرویس ───────────────────────────────────────────────────────────────
+async def show_buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = []
+    for pkg_id, pkg in PACKAGES.items():
+        keyboard.append([InlineKeyboardButton(
+            f"{pkg['name']}  —  {pkg['price']}", callback_data=f"pkg_{pkg_id}"
+        )])
     await update.message.reply_text(
-        "⚠️ شما هنوز هیچ سرویسی ندارید\n"
-        "برای خرید سرویس از دکمه 🛒 *خرید سرویس* استفاده کنید.",
+        "🛒 *انتخاب پکیج:*\n\nیکی از پکیج‌های زیر رو انتخاب کن:",
         parse_mode="Markdown",
-        reply_markup=keyboard
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-async def service_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ─── انتخاب پکیج (callback) ───────────────────────────────────────────────────
+async def cb_select_pkg(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    if query.data == "search_service":
-        await query.edit_message_text(
-            "🔍 *جستجوی سرویس*\n\nشماره سفارش یا آیدی سرویس خود را وارد کنید:",
-            parse_mode="Markdown"
-        )
-    elif query.data == "link_service":
-        await query.edit_message_text(
-            "🔗 *لینک کردن سرویس*\n\nکانفیگ دریافتی را اینجا وارد کنید:",
-            parse_mode="Markdown"
-        )
-    elif query.data == "back_home":
-        await query.edit_message_text("🏠 به منوی اصلی برگشتی.")
+    pkg_id = query.data.replace("pkg_", "")
+    pkg = PACKAGES.get(pkg_id)
+    if not pkg:
+        return
 
-# ─── پکیج‌ها ──────────────────────────────────────────────────────────────────
-async def show_packages_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "📦 *پکیج‌های موجود:*\n\n"
-    for pkg in PACKAGES.values():
-        text += f"{pkg['description']}\n➖➖➖➖➖➖\n\n"
-    text += "برای خرید دکمه 🛒 *خرید سرویس* رو بزن"
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=main_reply_keyboard())
+    user_state[query.from_user.id] = {"step": "waiting_receipt", "pkg_id": pkg_id}
+
+    await query.edit_message_text(
+        f"✅ *پکیج انتخابی:* {pkg['name']}\n\n"
+        f"{pkg['description']}\n\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "💳 *اطلاعات پرداخت:*\n\n"
+        f"🏦 شماره کارت:\n`{CARD_NUMBER}`\n\n"
+        f"👤 به نام: *{CARD_OWNER}*\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "📸 بعد از واریز، *عکس رسید* رو همین‌جا بفرست 👇",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("❌ انصراف", callback_data="cancel_buy")]
+        ])
+    )
+
+async def cb_cancel_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_state.pop(query.from_user.id, None)
+    await query.edit_message_text("❌ خرید لغو شد.\n\nهر وقت خواستی دوباره از منو اقدام کن.")
+
+# ─── سرویس‌های من ─────────────────────────────────────────────────────────────
+async def show_my_services(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "⚠️ شما هنوز هیچ سرویسی ندارید\n\n"
+        "برای خرید سرویس از دکمه 🛒 *خرید سرویس* استفاده کنید.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔍 جستجوی سرویس", callback_data="search_svc")],
+            [InlineKeyboardButton("🔗 لینک کردن سرویس", callback_data="link_svc")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="back_main")],
+        ])
+    )
+
+async def cb_svc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.data == "search_svc":
+        await query.edit_message_text(
+            "🔍 *جستجوی سرویس*\n\nشماره سفارش خود را وارد کنید:",
+            parse_mode="Markdown"
+        )
+    elif query.data == "link_svc":
+        await query.edit_message_text(
+            "🔗 *لینک کردن سرویس*\n\nکانفیگ دریافتی را وارد کنید:",
+            parse_mode="Markdown"
+        )
+    elif query.data == "back_main":
+        await query.edit_message_text("🏠 از منوی پایین انتخاب کن 👇")
+
+# ─── پشتیبانی ─────────────────────────────────────────────────────────────────
+async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🆘 *پشتیبانی TurkNet*\n\n"
+        f"👤 آیدی: @{SUPPORT_USERNAME}\n"
+        "🕐 ساعت کاری: ۸ صبح تا ۱۲ شب\n\n"
+        "برای ارتباط مستقیم دکمه زیر رو بزن 👇",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 پیام به پشتیبانی", url=f"https://t.me/{SUPPORT_USERNAME}")]
+        ])
+    )
 
 # ─── راهنما ───────────────────────────────────────────────────────────────────
 async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -125,88 +174,25 @@ async def show_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3️⃣ مبلغ رو به کارت واریز کن\n"
         "4️⃣ *عکس رسید* رو بفرست\n"
         "5️⃣ بعد از تایید ادمین، کانفیگ برات ارسال میشه\n\n"
-        f"❓ سوال داری؟ با پشتیبانی تماس بگیر:\n👤 @{SUPPORT_USERNAME}",
-        parse_mode="Markdown",
-        reply_markup=main_reply_keyboard()
+        f"❓ سوال داری؟\n👤 @{SUPPORT_USERNAME}",
+        parse_mode="Markdown"
     )
 
-# ─── پشتیبانی ─────────────────────────────────────────────────────────────────
-async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💬 پیام به پشتیبانی", url=f"https://t.me/{SUPPORT_USERNAME}")]
-    ])
-    await update.message.reply_text(
-        "🆘 *پشتیبانی TurkNet*\n\n"
-        f"👤 آیدی: @{SUPPORT_USERNAME}\n"
-        "🕐 ساعت کاری: ۸ صبح تا ۱۲ شب\n\n"
-        "برای ارتباط مستقیم دکمه زیر رو بزن 👇",
-        parse_mode="Markdown",
-        reply_markup=keyboard
-    )
+# ─── هندلر عکس (رسید) ─────────────────────────────────────────────────────────
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    state = user_state.get(user.id)
 
-# ─── خرید ─────────────────────────────────────────────────────────────────────
-async def buy_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = []
-    for pkg_id, pkg in PACKAGES.items():
-        keyboard.append([InlineKeyboardButton(
-            f"{pkg['name']} — {pkg['price']}", callback_data=f"select_{pkg_id}"
-        )])
+    if not state or state.get("step") != "waiting_receipt":
+        await update.message.reply_text("برای خرید از منو، 🛒 *خرید سرویس* رو بزن.", parse_mode="Markdown")
+        return
 
-    await update.message.reply_text(
-        "🛒 *انتخاب پکیج:*\n\nیکی از پکیج‌های زیر رو انتخاب کن:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def select_package(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    pkg_id = query.data.replace("select_", "")
-    pkg = PACKAGES.get(pkg_id)
-    if not pkg:
-        await query.answer("پکیج پیدا نشد!", show_alert=True)
-        return ConversationHandler.END
-
-    context.user_data["selected_package"] = pkg_id
-
-    text = (
-        f"✅ *پکیج انتخابی:* {pkg['name']}\n\n"
-        f"{pkg['description']}\n\n"
-        "━━━━━━━━━━━━━━━━\n"
-        "💳 *اطلاعات پرداخت:*\n\n"
-        f"🏦 شماره کارت:\n`{CARD_NUMBER}`\n\n"
-        f"👤 به نام: *{CARD_OWNER}*\n"
-        "━━━━━━━━━━━━━━━━\n\n"
-        "📸 بعد از واریز، *عکس رسید* رو اینجا بفرست"
-    )
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("❌ انصراف", callback_data="cancel_buy")]
-    ])
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
-    return WAITING_RECEIPT
-
-async def cancel_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("❌ خرید لغو شد.")
-    return ConversationHandler.END
-
-async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo:
-        await update.message.reply_text(
-            "⚠️ لطفاً *عکس* رسید رو بفرست (نه فایل یا متن).",
-            parse_mode="Markdown"
-        )
-        return WAITING_RECEIPT
-
-    pkg_id = context.user_data.get("selected_package")
-    pkg = PACKAGES.get(pkg_id)
+    pkg = PACKAGES.get(state["pkg_id"])
     if not pkg:
         await update.message.reply_text("❌ خطا! دوباره /start بزن.")
-        return ConversationHandler.END
+        user_state.pop(user.id, None)
+        return
 
-    user = update.effective_user
     order_id = next_order_id()
     file_id = update.message.photo[-1].file_id
 
@@ -214,28 +200,27 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "user_id": user.id,
         "username": user.username or user.first_name,
         "package": pkg,
-        "receipt_file_id": file_id,
     }
+    user_state.pop(user.id, None)
 
-    admin_keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ تایید و ارسال کانفیگ", callback_data=f"approve_{order_id}")],
-        [InlineKeyboardButton("❌ رد سفارش", callback_data=f"reject_{order_id}")],
-    ])
-    caption = (
-        f"🔔 *سفارش جدید!*\n\n"
-        f"🆔 سفارش: `{order_id}`\n"
-        f"👤 کاربر: @{user.username or '—'}\n"
-        f"🔢 آیدی: `{user.id}`\n"
-        f"📦 پکیج: {pkg['name']}\n"
-        f"💰 مبلغ: {pkg['price']}\n\n"
-        f"📸 رسید پرداخت 👆"
-    )
+    # نوتیف ادمین
     await context.bot.send_photo(
         chat_id=ADMIN_ID,
         photo=file_id,
-        caption=caption,
+        caption=(
+            f"🔔 *سفارش جدید!*\n\n"
+            f"🆔 سفارش: `{order_id}`\n"
+            f"👤 کاربر: @{user.username or '—'}\n"
+            f"🔢 آیدی: `{user.id}`\n"
+            f"📦 پکیج: {pkg['name']}\n"
+            f"💰 مبلغ: {pkg['price']}\n\n"
+            f"📸 رسید پرداخت 👆"
+        ),
         parse_mode="Markdown",
-        reply_markup=admin_keyboard
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ تایید — ارسال کانفیگ", callback_data=f"approve_{order_id}")],
+            [InlineKeyboardButton("❌ رد سفارش", callback_data=f"reject_{order_id}")],
+        ])
     )
 
     await update.message.reply_text(
@@ -244,82 +229,42 @@ async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ در حال بررسی توسط ادمین...\n\n"
         f"📞 پشتیبانی: @{SUPPORT_USERNAME}",
         parse_mode="Markdown",
-        reply_markup=main_reply_keyboard()
+        reply_markup=main_kb()
     )
-    return ConversationHandler.END
 
 # ─── ادمین: تایید ─────────────────────────────────────────────────────────────
-async def admin_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cb_approve(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if update.effective_user.id != ADMIN_ID:
+    if query.from_user.id != ADMIN_ID:
         await query.answer("⛔ فقط ادمین!", show_alert=True)
         return
 
     order_id = query.data.replace("approve_", "")
-    order = pending_orders.get(order_id)
-    if not order:
+    if order_id not in pending_orders:
         await query.edit_message_caption("⚠️ این سفارش قبلاً پردازش شده.", parse_mode="Markdown")
         return
 
-    context.bot_data[f"pending_config_{ADMIN_ID}"] = order_id
+    # ست کردن state ادمین برای دریافت کانفیگ
+    user_state[ADMIN_ID] = {"step": "waiting_config", "order_id": order_id}
+
     await query.edit_message_caption(
-        query.message.caption + f"\n\n✅ *تایید شد*\n\nحالا کانفیگ سفارش `{order_id}` رو بفرست:",
-        parse_mode="Markdown"
-    )
-    return WAITING_CONFIG
-
-async def receive_config_from_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    order_id = context.bot_data.get(f"pending_config_{ADMIN_ID}")
-    if not order_id:
-        return
-
-    order = pending_orders.get(order_id)
-    if not order:
-        await update.message.reply_text("⚠️ سفارش پیدا نشد.")
-        return
-
-    config_text = update.message.text
-    pkg = order["package"]
-
-    await context.bot.send_message(
-        chat_id=order["user_id"],
-        text=(
-            f"🎉 *سفارش تایید شد!*\n\n"
-            f"📦 پکیج: {pkg['name']}\n"
-            f"🆔 سفارش: `{order_id}`\n\n"
-            "━━━━━━━━━━━━━━━━\n"
-            f"🔑 *کانفیگ شما:*\n\n"
-            f"`{config_text}`\n"
-            "━━━━━━━━━━━━━━━━\n\n"
-            f"✅ ممنون از خریدت!\n"
-            f"📞 پشتیبانی: @{SUPPORT_USERNAME}"
-        ),
-        parse_mode="Markdown"
-    )
-
-    del pending_orders[order_id]
-    context.bot_data.pop(f"pending_config_{ADMIN_ID}", None)
-    await update.message.reply_text(
-        f"✅ کانفیگ برای سفارش `{order_id}` ارسال شد.",
+        query.message.caption + f"\n\n✅ *تایید شد*\n\nکانفیگ سفارش `{order_id}` رو بفرست:",
         parse_mode="Markdown"
     )
 
 # ─── ادمین: رد ────────────────────────────────────────────────────────────────
-async def admin_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cb_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if update.effective_user.id != ADMIN_ID:
+    if query.from_user.id != ADMIN_ID:
         await query.answer("⛔ فقط ادمین!", show_alert=True)
         return
 
     order_id = query.data.replace("reject_", "")
-    order = pending_orders.get(order_id)
+    order = pending_orders.pop(order_id, None)
     if not order:
         await query.edit_message_caption("⚠️ این سفارش قبلاً پردازش شده.", parse_mode="Markdown")
         return
@@ -330,81 +275,79 @@ async def admin_reject(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ *سفارش رد شد!*\n\n"
             f"🆔 سفارش: `{order_id}`\n\n"
             f"⚠️ رسید تایید نشد.\n"
-            f"برای پیگیری با پشتیبانی تماس بگیر:\n"
-            f"👤 @{SUPPORT_USERNAME}"
+            f"برای پیگیری: @{SUPPORT_USERNAME}"
         ),
         parse_mode="Markdown"
     )
-
-    del pending_orders[order_id]
     await query.edit_message_caption(
         query.message.caption + "\n\n❌ *رد شد*",
         parse_mode="Markdown"
     )
 
-# ─── هندلر متن‌های منو ────────────────────────────────────────────────────────
+# ─── هندلر متن ────────────────────────────────────────────────────────────────
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     text = update.message.text
+
+    # ادمین داره کانفیگ می‌فرسته
+    if user.id == ADMIN_ID:
+        state = user_state.get(ADMIN_ID)
+        if state and state.get("step") == "waiting_config":
+            order_id = state["order_id"]
+            order = pending_orders.pop(order_id, None)
+            user_state.pop(ADMIN_ID, None)
+
+            if not order:
+                await update.message.reply_text("⚠️ سفارش پیدا نشد.")
+                return
+
+            await context.bot.send_message(
+                chat_id=order["user_id"],
+                text=(
+                    f"🎉 *سفارش تایید شد!*\n\n"
+                    f"📦 پکیج: {order['package']['name']}\n"
+                    f"🆔 سفارش: `{order_id}`\n\n"
+                    "━━━━━━━━━━━━━━━━\n"
+                    f"🔑 *کانفیگ شما:*\n\n"
+                    f"`{text}`\n"
+                    "━━━━━━━━━━━━━━━━\n\n"
+                    f"✅ ممنون از خریدت!\n"
+                    f"📞 پشتیبانی: @{SUPPORT_USERNAME}"
+                ),
+                parse_mode="Markdown"
+            )
+            await update.message.reply_text(f"✅ کانفیگ برای `{order_id}` ارسال شد.", parse_mode="Markdown")
+            return
+
+    # منوی کاربر
     if text == "🛒 خرید سرویس":
-        await buy_menu(update, context)
+        await show_buy_menu(update, context)
     elif text == "📦 سرویس‌های من":
-        await my_services(update, context)
+        await show_my_services(update, context)
     elif text == "🆘 پشتیبانی":
         await show_support(update, context)
     elif text == "ℹ️ راهنما":
         await show_help(update, context)
+    else:
+        await update.message.reply_text("از منوی پایین یه گزینه انتخاب کن 👇", reply_markup=main_kb())
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ لغو شد.", reply_markup=main_reply_keyboard())
-    return ConversationHandler.END
-
-# ─── Post init: تنظیم دکمه‌های کامند ─────────────────────────────────────────
+# ─── post init ────────────────────────────────────────────────────────────────
 async def post_init(application: Application):
     await application.bot.set_my_commands([
         BotCommand("start", "شروع / منوی اصلی"),
-        BotCommand("buy", "خرید سرویس"),
-        BotCommand("support", "پشتیبانی"),
     ])
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    buy_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(select_package, pattern="^select_")],
-        states={
-            WAITING_RECEIPT: [MessageHandler(filters.PHOTO, receive_receipt)],
-        },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            CallbackQueryHandler(cancel_buy, pattern="^cancel_buy$"),
-        ],
-        per_chat=True,
-        per_user=True,
-        per_message=False,
-    )
-
-    admin_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_approve, pattern="^approve_")],
-        states={
-            WAITING_CONFIG: [MessageHandler(
-                filters.TEXT & ~filters.COMMAND & filters.User(ADMIN_ID),
-                receive_config_from_admin
-            )],
-        },
-        fallbacks=[],
-        per_chat=True,
-        per_user=True,
-        per_message=False,
-    )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("buy", buy_menu))
-    app.add_handler(CommandHandler("support", show_support))
-    app.add_handler(buy_conv)
-    app.add_handler(admin_conv)
-    app.add_handler(CallbackQueryHandler(admin_reject, pattern="^reject_"))
-    app.add_handler(CallbackQueryHandler(service_callbacks, pattern="^(search_service|link_service|back_home)$"))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CallbackQueryHandler(cb_select_pkg,  pattern="^pkg_"))
+    app.add_handler(CallbackQueryHandler(cb_cancel_buy,  pattern="^cancel_buy$"))
+    app.add_handler(CallbackQueryHandler(cb_approve,     pattern="^approve_"))
+    app.add_handler(CallbackQueryHandler(cb_reject,      pattern="^reject_"))
+    app.add_handler(CallbackQueryHandler(cb_svc,         pattern="^(search_svc|link_svc|back_main)$"))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logger.info("Bot started...")
